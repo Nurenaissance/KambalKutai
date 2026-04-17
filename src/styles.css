@@ -214,6 +214,39 @@ canvas {
   margin-top: 20px;
 }
 
+.match-status {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  display: grid;
+  gap: 4px;
+  max-width: min(340px, calc(100% - 36px));
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(17, 26, 46, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.match-status span,
+.match-status small,
+.status-copy {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.mobile-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.mobile-controls button {
+  min-height: 48px;
+  border-radius: 8px;
+  touch-action: none;
+  user-select: none;
+}
+
 @media (max-width: 1100px) {
   .hero-panel,
   .game-layout {
@@ -232,6 +265,11 @@ canvas {
     margin-top: 12px;
   }
 
+  .match-status {
+    position: static;
+    order: 3;
+  }
+
   .canvas-wrap {
     display: flex;
     flex-direction: column;
@@ -244,5 +282,9 @@ canvas {
 
   .overlay-actions {
     flex-direction: column;
+  }
+
+  .mobile-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

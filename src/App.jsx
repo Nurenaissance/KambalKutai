@@ -500,25 +500,282 @@ function drawArena(ctx, level) {
   ctx.fillText(level.title, ARENA.width / 2, 80);
 }
 
+const MATCHMAKER_URL =
+  import.meta.env.VITE_MATCHMAKER_URL ||
+  `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8787`;
+
+const EMPTY_INPUT = {
+  left: false,
+  right: false,
+  jump: false,
+  attack: false,
+  throw: false,
+  guard: false,
+};
+
+const ONLINE_KEY_TO_ACTION = {
+  a: "left",
+  arrowleft: "left",
+  d: "right",
+  arrowright: "right",
+  w: "jump",
+  arrowup: "jump",
+  f: "attack",
+  j: "attack",
+  g: "throw",
+  k: "throw",
+  s: "guard",
+  arrowdown: "guard",
+};
+
+const LOCAL_PLAYER_ONE_KEYS = {
+  a: "left",
+  d: "right",
+  w: "jump",
+  f: "attack",
+  g: "throw",
+  s: "guard",
+};
+
+const LOCAL_PLAYER_TWO_KEYS = {
+  j: "left",
+  l: "right",
+  i: "jump",
+  h: "attack",
+  k: "throw",
+  u: "guard",
+};
+
+const MOBILE_CONTROLS = [
+  { action: "left", label: "Left" },
+  { action: "right", label: "Right" },
+  { action: "jump", label: "Jump" },
+  { action: "guard", label: "Guard" },
+  { action: "attack", label: "Swing" },
+  { action: "throw", label: "Throw" },
+];
+
+function cloneInput(input = EMPTY_INPUT) {
+  return { ...EMPTY_INPUT, ...input };
+}
+
+function createInputState() {
+  return [cloneInput(), cloneInput()];
+}
+
 export default function App() {
   const canvasRef = useRef(null);
   const keysRef = useRef(new Set());
+  const socketRef = useRef(null);
+  const inputStatesRef = useRef(createInputState());
   const lastTimeRef = useRef(0);
+  const lastSnapshotSentRef = useRef(0);
+  const playerIndexRef = useRef(0);
   const [levelIndex, setLevelIndex] = useState(0);
   const [gameState, setGameState] = useState(createInitialState);
   const [winner, setWinner] = useState(null);
   const [round, setRound] = useState(1);
+  const [playMode, setPlayMode] = useState("idle");
+  const [connectionStatus, setConnectionStatus] = useState("idle");
+  const [onlineMessage, setOnlineMessage] = useState("");
+  const [roomId, setRoomId] = useState("");
+  const [playerIndex, setPlayerIndex] = useState(0);
 
   const level = LEVELS[levelIndex];
   const { fighters, projectiles } = gameState;
+  const localFighter = fighters[playerIndex];
+  const isOnline = playMode === "online" || connectionStatus === "waiting";
+  const isHost = playMode === "offline" || (playMode === "online" && playerIndex === 0);
+
+  function sendSocketMessage(message) {
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(message));
+    }
+  }
+
+  function updateLocalInput(action, pressed, targetIndex = playerIndexRef.current) {
+    const index = targetIndex;
+    inputStatesRef.current[index] = {
+      ...inputStatesRef.current[index],
+      [action]: pressed,
+    };
+
+    if (playMode === "online" && index === playerIndexRef.current) {
+      sendSocketMessage({
+        type: "input",
+        input: inputStatesRef.current[index],
+      });
+    }
+  }
+
+  function clearInputs() {
+    keysRef.current.clear();
+    inputStatesRef.current = createInputState();
+  }
+
+  function applyRemoteSnapshot(snapshot) {
+    if (!snapshot) {
+      return;
+    }
+
+    if (typeof snapshot.levelIndex === "number") {
+      setLevelIndex(snapshot.levelIndex);
+    }
+    if (typeof snapshot.round === "number") {
+      setRound(snapshot.round);
+    }
+    setWinner(snapshot.winner ?? null);
+    if (snapshot.gameState) {
+      setGameState(snapshot.gameState);
+    }
+    lastTimeRef.current = 0;
+  }
+
+  function startOfflineGame() {
+    clearInputs();
+    playerIndexRef.current = 0;
+    setPlayerIndex(0);
+    setConnectionStatus("idle");
+    setOnlineMessage("");
+    setRoomId("");
+    setPlayMode("offline");
+    resetRound(0, 1, false);
+  }
+
+  function startOnlineGame() {
+    clearInputs();
+    setPlayMode("idle");
+    setConnectionStatus("connecting");
+    setOnlineMessage("Connecting to the matchmaker...");
+    setRoomId("");
+    setWinner(null);
+    setGameState(createInitialState());
+    lastTimeRef.current = 0;
+
+    if (socketRef.current) {
+      const previousSocket = socketRef.current;
+      socketRef.current = null;
+      previousSocket.close();
+    }
+    const socket = new WebSocket(MATCHMAKER_URL);
+    socketRef.current = socket;
+
+    socket.addEventListener("open", () => {
+      setConnectionStatus("waiting");
+      setOnlineMessage("Looking for another player...");
+      sendSocketMessage({ type: "find_match" });
+    });
+
+    socket.addEventListener("message", (event) => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+
+      if (message.type === "waiting") {
+        setConnectionStatus("waiting");
+        setOnlineMessage("Waiting for an opponent...");
+        return;
+      }
+
+      if (message.type === "matched") {
+        clearInputs();
+        playerIndexRef.current = message.playerIndex;
+        setPlayerIndex(message.playerIndex);
+        setRoomId(message.roomId);
+        setPlayMode("online");
+        setConnectionStatus("matched");
+        setOnlineMessage(
+          message.playerIndex === 0
+            ? "Matched. You are hosting the round."
+            : "Matched. Your opponent is hosting the round.",
+        );
+        resetRound(0, 1, false);
+        return;
+      }
+
+      if (message.type === "input" && message.playerIndex === 1 && playerIndexRef.current === 0) {
+        inputStatesRef.current[message.playerIndex] = cloneInput(message.input);
+        return;
+      }
+
+      if (message.type === "state" && playerIndexRef.current !== 0) {
+        applyRemoteSnapshot(message);
+        return;
+      }
+
+      if (message.type === "reset") {
+        applyRemoteSnapshot(message);
+        return;
+      }
+
+      if (message.type === "opponent_left") {
+        setConnectionStatus("disconnected");
+        setOnlineMessage("Opponent left. Start again to find a new match.");
+        setPlayMode("idle");
+        clearInputs();
+      }
+    });
+
+    socket.addEventListener("close", () => {
+      if (socketRef.current === socket) {
+        setConnectionStatus("disconnected");
+        setOnlineMessage("Disconnected from the matchmaker.");
+        setPlayMode("idle");
+        socketRef.current = null;
+      }
+    });
+
+    socket.addEventListener("error", () => {
+      setConnectionStatus("disconnected");
+      setOnlineMessage(`Could not connect to ${MATCHMAKER_URL}.`);
+      setPlayMode("idle");
+    });
+  }
+
+  function cancelOnlineSearch() {
+    sendSocketMessage({ type: "cancel_match" });
+    const socket = socketRef.current;
+    socketRef.current = null;
+    socket?.close();
+    clearInputs();
+    setConnectionStatus("idle");
+    setOnlineMessage("");
+    setPlayMode("idle");
+  }
 
   useEffect(() => {
     function onKeyDown(event) {
-      keysRef.current.add(event.key.toLowerCase());
+      const key = event.key.toLowerCase();
+      const isLocalTwoPlayer = playMode === "offline";
+      const action = isLocalTwoPlayer
+        ? LOCAL_PLAYER_ONE_KEYS[key] || LOCAL_PLAYER_TWO_KEYS[key]
+        : ONLINE_KEY_TO_ACTION[key];
+      if (!action) {
+        return;
+      }
+      const targetIndex = isLocalTwoPlayer && LOCAL_PLAYER_TWO_KEYS[key] ? 1 : playerIndexRef.current;
+      event.preventDefault();
+      keysRef.current.add(key);
+      updateLocalInput(action, true, targetIndex);
     }
 
     function onKeyUp(event) {
-      keysRef.current.delete(event.key.toLowerCase());
+      const key = event.key.toLowerCase();
+      const isLocalTwoPlayer = playMode === "offline";
+      const action = isLocalTwoPlayer
+        ? LOCAL_PLAYER_ONE_KEYS[key] || LOCAL_PLAYER_TWO_KEYS[key]
+        : ONLINE_KEY_TO_ACTION[key];
+      if (!action) {
+        return;
+      }
+      const targetIndex = isLocalTwoPlayer && LOCAL_PLAYER_TWO_KEYS[key] ? 1 : playerIndexRef.current;
+      event.preventDefault();
+      keysRef.current.delete(key);
+      updateLocalInput(action, false, targetIndex);
     }
 
     window.addEventListener("keydown", onKeyDown);
@@ -527,6 +784,12 @@ export default function App() {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [playMode]);
+
+  useEffect(() => {
+    return () => {
+      socketRef.current?.close();
     };
   }, []);
 
@@ -537,6 +800,11 @@ export default function App() {
     const jumpPower = 760;
 
     function step(timestamp) {
+      if (!isHost || playMode === "idle" || connectionStatus === "waiting") {
+        frameId = window.requestAnimationFrame(step);
+        return;
+      }
+
       if (!lastTimeRef.current) {
         lastTimeRef.current = timestamp;
       }
@@ -546,17 +814,16 @@ export default function App() {
       setGameState((current) => {
         const nextFighters = current.fighters.map((fighter) => ({ ...fighter }));
         const nextProjectiles = [];
+        let nextWinner = winner;
 
         nextFighters.forEach((fighter, index) => {
-          const controls = fighter.controls;
-          const keys = keysRef.current;
+          const input = inputStatesRef.current[index] ?? EMPTY_INPUT;
           const enemy = nextFighters[index === 0 ? 1 : 0];
-          const horizontal =
-            (keys.has(controls.right) ? 1 : 0) - (keys.has(controls.left) ? 1 : 0);
+          const horizontal = (input.right ? 1 : 0) - (input.left ? 1 : 0);
 
           const disabled = fighter.downedTimer > 0 || fighter.entrappedTimer > 0;
           fighter.isGuarding =
-            !disabled && keys.has(controls.guard) && fighter.guardBrokenTimer <= 0;
+            !disabled && input.guard && fighter.guardBrokenTimer <= 0;
           const speedPenalty = fighter.isGuarding ? 0.4 : 1;
           fighter.vx = disabled ? 0 : horizontal * moveSpeed * speedPenalty;
           fighter.x = clamp(fighter.x + fighter.vx * delta, 20, ARENA.width - fighter.width - 20);
@@ -566,7 +833,7 @@ export default function App() {
           }
 
           const grounded = fighter.y >= ARENA.floorY;
-          if (keys.has(controls.jump) && grounded && !fighter.isGuarding && !disabled) {
+          if (input.jump && grounded && !fighter.isGuarding && !disabled) {
             fighter.vy = -jumpPower;
           }
 
@@ -599,7 +866,7 @@ export default function App() {
             !winner &&
             !fighter.isGuarding &&
             !disabled &&
-            keys.has(controls.attack) &&
+            input.attack &&
             fighter.cooldownTimer <= 0
           ) {
             fighter.attackTimer = 180;
@@ -624,7 +891,7 @@ export default function App() {
             !winner &&
             !fighter.isGuarding &&
             !disabled &&
-            keys.has(controls.throw) &&
+            input.throw &&
             fighter.projectileCooldownTimer <= 0
           ) {
             fighter.projectileCooldownTimer = level.projectileCooldown;
@@ -690,14 +957,32 @@ export default function App() {
           const defeated = nextFighters.find((fighter) => fighter.hp <= 0);
           if (defeated) {
             const victor = nextFighters.find((fighter) => fighter.hp > 0);
-            setWinner(victor?.key ?? "draw");
+            nextWinner = victor?.key ?? "draw";
+            setWinner(nextWinner);
           }
         }
 
-        return {
+        const nextState = {
           fighters: nextFighters,
           projectiles: nextProjectiles,
         };
+
+        if (
+          playMode === "online" &&
+          playerIndexRef.current === 0 &&
+          timestamp - lastSnapshotSentRef.current > 33
+        ) {
+          lastSnapshotSentRef.current = timestamp;
+          sendSocketMessage({
+            type: "state",
+            gameState: nextState,
+            levelIndex,
+            winner: nextWinner,
+            round,
+          });
+        }
+
+        return nextState;
       });
 
       frameId = window.requestAnimationFrame(step);
@@ -708,7 +993,7 @@ export default function App() {
       window.cancelAnimationFrame(frameId);
       lastTimeRef.current = 0;
     };
-  }, [level, winner]);
+  }, [connectionStatus, isHost, level, levelIndex, playMode, round, winner]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -720,12 +1005,25 @@ export default function App() {
     });
   }, [fighters, level, projectiles, winner]);
 
-  function resetRound(nextLevelIndex = levelIndex, nextRound = round) {
+  function resetRound(nextLevelIndex = levelIndex, nextRound = round, notifyOpponent = true) {
+    const nextState = createInitialState();
     setLevelIndex(nextLevelIndex);
     setRound(nextRound);
     setWinner(null);
-    setGameState(createInitialState());
+    setGameState(nextState);
     lastTimeRef.current = 0;
+    lastSnapshotSentRef.current = 0;
+    clearInputs();
+
+    if (notifyOpponent && playMode === "online" && playerIndexRef.current === 0) {
+      sendSocketMessage({
+        type: "reset",
+        gameState: nextState,
+        levelIndex: nextLevelIndex,
+        winner: null,
+        round: nextRound,
+      });
+    }
   }
 
   function advanceLevel() {
@@ -734,6 +1032,8 @@ export default function App() {
   }
 
   const rosterText = `${CHARACTER_DEFS.map((fighter) => fighter.name).join(", ")} and Daivik`;
+  const showStartOverlay = playMode === "idle";
+  const showWaitingOverlay = connectionStatus === "connecting" || connectionStatus === "waiting";
 
   return (
     <div className="app-shell">
@@ -765,6 +1065,17 @@ export default function App() {
             height={ARENA.height}
             aria-label="Kambal Pitai game canvas"
           />
+          {isOnline && (
+            <div className="match-status">
+              <strong>
+                {playMode === "online" && localFighter
+                  ? `You are ${localFighter.name}`
+                  : "Online match"}
+              </strong>
+              <span>{onlineMessage}</span>
+              {roomId && <small>Room {roomId.slice(0, 8)}</small>}
+            </div>
+          )}
           <div className="hud">
             {fighters.map((fighter) => (
               <div className="hud-card" key={fighter.key}>
@@ -800,6 +1111,32 @@ export default function App() {
               </div>
             ))}
           </div>
+          {(showStartOverlay || showWaitingOverlay) && (
+            <div className="overlay">
+              <div className="overlay-card">
+                <p className="eyebrow">Online Matchmaking</p>
+                <h2>{showWaitingOverlay ? "Finding opponent" : "Start game"}</h2>
+                <p>
+                  Start an online match to be paired with another player. Each player
+                  uses the same keyboard controls on their own device, or the mobile
+                  buttons below the arena.
+                </p>
+                {onlineMessage && <p className="status-copy">{onlineMessage}</p>}
+                <div className="overlay-actions">
+                  {showWaitingOverlay ? (
+                    <button onClick={cancelOnlineSearch}>Cancel</button>
+                  ) : (
+                    <>
+                      <button className="accent" onClick={startOnlineGame}>
+                        Start online game
+                      </button>
+                      <button onClick={startOfflineGame}>Local practice</button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
           {winner && (
             <div className="overlay">
               <div className="overlay-card">
@@ -819,19 +1156,39 @@ export default function App() {
               </div>
             </div>
           )}
+          <div className="mobile-controls" aria-label="Mobile controls">
+            {MOBILE_CONTROLS.map((control) => (
+              <button
+                key={control.action}
+                type="button"
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  updateLocalInput(control.action, true);
+                }}
+                onPointerUp={(event) => {
+                  event.preventDefault();
+                  updateLocalInput(control.action, false);
+                }}
+                onPointerCancel={() => updateLocalInput(control.action, false)}
+                onPointerLeave={() => updateLocalInput(control.action, false)}
+              >
+                {control.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <aside className="side-panel">
           <div className="panel-card">
             <p className="eyebrow">Controls</p>
-            <h3>Local 2-player</h3>
+            <h3>Online or local</h3>
             <p>
-              <strong>Advit:</strong> `A/D` move, `W` jump, `F` swing, `G` throw, `S`
-              guard
+              <strong>Keyboard:</strong> `A/D` or arrow keys move, `W` or up jumps,
+              `F` or `J` swings, `G` or `K` throws, `S` or down guards.
             </p>
             <p>
-              <strong>Adarsh:</strong> `J/L` move, `I` jump, `H` swing, `K` throw, `U`
-              guard
+              In online matches both players use these same controls on their own
+              device. The matchmaker assigns the fighter.
             </p>
           </div>
 

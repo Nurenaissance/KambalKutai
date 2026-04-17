@@ -1,0 +1,25 @@
+
+> advitgame@0.1.0 dev:online
+> concurrently "npm run server" "npm run dev"
+
+[0] 
+[0] > advitgame@0.1.0 server
+[0] > node server/matchmaker.js
+[0] 
+[1] 
+[1] > advitgame@0.1.0 dev
+[1] > vite
+[1] 
+[0] Matchmaker listening on ws://localhost:8787
+[1] Re-optimizing dependencies because lockfile has changed
+[1] 
+[1]   [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m2140[22m[2m[0m ms[22m
+[1] 
+[1]   [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
+[1] [2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[0] ^C
+[1] ^C
+[0] ^C
+[0] npm run server exited with code 3221225786
+[1] ^C
+[1] npm run dev exited with code 3221225786
