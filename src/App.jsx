@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { io } from "socket.io-client";
 
 const ARENA = {
   width: 980,
@@ -500,9 +501,9 @@ function drawArena(ctx, level) {
   ctx.fillText(level.title, ARENA.width / 2, 80);
 }
 
-const MATCHMAKER_URL =
-  import.meta.env.VITE_MATCHMAKER_URL ||
-  `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8787`;
+const BACKEND_URL =
+  import.meta.env.VITE_BACKEND_URL ||
+  `${window.location.protocol}//${window.location.hostname}:3001`;
 
 const EMPTY_INPUT = {
   left: false,
@@ -589,8 +590,42 @@ export default function App() {
 
   function sendSocketMessage(message) {
     const socket = socketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(message));
+    if (!socket?.connected) {
+      return;
+    }
+
+    if (message.type === "find_match") {
+      socket.emit("game:find-match");
+      return;
+    }
+    if (message.type === "cancel_match") {
+      socket.emit("game:cancel-match");
+      return;
+    }
+    if (message.type === "input") {
+      socket.emit("game:input", { input: message.input });
+      return;
+    }
+    if (message.type === "state") {
+      socket.emit("game:state", {
+        gameState: message.gameState,
+        levelIndex: message.levelIndex,
+        winner: message.winner,
+        round: message.round,
+      });
+      return;
+    }
+    if (message.type === "reset") {
+      socket.emit("game:reset", {
+        gameState: message.gameState,
+        levelIndex: message.levelIndex,
+        winner: message.winner,
+        round: message.round,
+      });
+      return;
+    }
+    if (message.type === "level") {
+      socket.emit("game:level", message);
     }
   }
 
@@ -656,82 +691,79 @@ export default function App() {
     if (socketRef.current) {
       const previousSocket = socketRef.current;
       socketRef.current = null;
-      previousSocket.close();
+      previousSocket.disconnect();
     }
-    const socket = new WebSocket(MATCHMAKER_URL);
+    const socket = io(BACKEND_URL, {
+      transports: ["websocket"],
+    });
     socketRef.current = socket;
 
-    socket.addEventListener("open", () => {
+    socket.on("connect", () => {
       setConnectionStatus("waiting");
       setOnlineMessage("Looking for another player...");
       sendSocketMessage({ type: "find_match" });
     });
 
-    socket.addEventListener("message", (event) => {
-      let message;
-      try {
-        message = JSON.parse(event.data);
-      } catch {
-        return;
-      }
+    socket.on("game:searching", () => {
+      setConnectionStatus("waiting");
+      setOnlineMessage("Waiting for an opponent...");
+    });
 
-      if (message.type === "waiting") {
-        setConnectionStatus("waiting");
-        setOnlineMessage("Waiting for an opponent...");
-        return;
-      }
+    socket.on("game:matched", (message) => {
+      clearInputs();
+      playerIndexRef.current = message.playerIndex;
+      setPlayerIndex(message.playerIndex);
+      setRoomId(message.roomId);
+      setPlayMode("online");
+      setConnectionStatus("matched");
+      setOnlineMessage(
+        message.playerIndex === 0
+          ? "Matched. You are hosting the round."
+          : "Matched. Your opponent is hosting the round.",
+      );
+      resetRound(0, 1, false);
+    });
 
-      if (message.type === "matched") {
-        clearInputs();
-        playerIndexRef.current = message.playerIndex;
-        setPlayerIndex(message.playerIndex);
-        setRoomId(message.roomId);
-        setPlayMode("online");
-        setConnectionStatus("matched");
-        setOnlineMessage(
-          message.playerIndex === 0
-            ? "Matched. You are hosting the round."
-            : "Matched. Your opponent is hosting the round.",
-        );
-        resetRound(0, 1, false);
-        return;
-      }
-
-      if (message.type === "input" && message.playerIndex === 1 && playerIndexRef.current === 0) {
+    socket.on("game:input", (message) => {
+      if (message.playerIndex === 1 && playerIndexRef.current === 0) {
         inputStatesRef.current[message.playerIndex] = cloneInput(message.input);
-        return;
-      }
-
-      if (message.type === "state" && playerIndexRef.current !== 0) {
-        applyRemoteSnapshot(message);
-        return;
-      }
-
-      if (message.type === "reset") {
-        applyRemoteSnapshot(message);
-        return;
-      }
-
-      if (message.type === "opponent_left") {
-        setConnectionStatus("disconnected");
-        setOnlineMessage("Opponent left. Start again to find a new match.");
-        setPlayMode("idle");
-        clearInputs();
       }
     });
 
-    socket.addEventListener("close", () => {
+    socket.on("game:state", (message) => {
+      if (playerIndexRef.current !== 0) {
+        applyRemoteSnapshot(message);
+      }
+    });
+
+    socket.on("game:reset", applyRemoteSnapshot);
+    socket.on("game:level", applyRemoteSnapshot);
+
+    socket.on("game:opponent-left", () => {
+      setConnectionStatus("disconnected");
+      setOnlineMessage("Opponent left. Start again to find a new match.");
+      setPlayMode("idle");
+      clearInputs();
+    });
+
+    socket.on("game:error", ({ message }) => {
+      setConnectionStatus("disconnected");
+      setOnlineMessage(message || "The game backend returned an error.");
+      setPlayMode("idle");
+    });
+
+    socket.on("disconnect", () => {
       if (socketRef.current === socket) {
         setConnectionStatus("disconnected");
-        setOnlineMessage("Disconnected from the matchmaker.");
+        setOnlineMessage("Disconnected from the backend.");
         setPlayMode("idle");
         socketRef.current = null;
       }
     });
 
-    socket.addEventListener("error", () => {
+    socket.on("connect_error", () => {
       setConnectionStatus("disconnected");
-      setOnlineMessage(`Could not connect to ${MATCHMAKER_URL}.`);
+      setOnlineMessage(`Could not connect to ${BACKEND_URL}.`);
       setPlayMode("idle");
     });
   }
@@ -740,7 +772,7 @@ export default function App() {
     sendSocketMessage({ type: "cancel_match" });
     const socket = socketRef.current;
     socketRef.current = null;
-    socket?.close();
+    socket?.disconnect();
     clearInputs();
     setConnectionStatus("idle");
     setOnlineMessage("");
@@ -789,7 +821,7 @@ export default function App() {
 
   useEffect(() => {
     return () => {
-      socketRef.current?.close();
+      socketRef.current?.disconnect();
     };
   }, []);
 
